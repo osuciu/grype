@@ -36,6 +36,7 @@ func NewPresenter(matches match.Matches, ignoredMatches []match.IgnoredMatch, pa
 
 // Present creates a JSON-based reporting
 func (pres *Presenter) Present(output io.Writer) error {
+	//fmt.Println("PRESENT")
 	doc, err := models.NewDocument(pres.packages, pres.context, pres.matches, pres.ignoredMatches, pres.metadataProvider,
 		pres.appConfig, pres.dbStatus)
 	if err != nil {
@@ -45,6 +46,6 @@ func (pres *Presenter) Present(output io.Writer) error {
 	enc := json.NewEncoder(output)
 	// prevent > and < from being escaped in the payload
 	enc.SetEscapeHTML(false)
-	enc.SetIndent("", " ")
+	//enc.SetIndent("", " ")
 	return enc.Encode(&doc)
 }

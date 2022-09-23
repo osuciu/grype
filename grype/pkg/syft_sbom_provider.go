@@ -37,7 +37,8 @@ func (e errEmptySBOM) Error() string {
 }
 
 func syftSBOMProvider(userInput string, config ProviderConfig) ([]Package, Context, error) {
-	s, err := getSBOM(userInput, config)
+
+	s, err := getSBOM2(userInput, config)
 	if err != nil {
 		return nil, Context{}, err
 	}
@@ -60,13 +61,91 @@ type inputInfo struct {
 	Scheme      string
 }
 
+func getSBOM2(userInput string, config ProviderConfig) (*sbom.SBOM, error) {
+	// reader := strings.NewReader(sbomInput)
+
+	reader := strings.NewReader(userInput)
+
+	s, format, err := syft.Decode(reader)
+
+	if err != nil {
+		return nil, fmt.Errorf("unable to decode sbom: %w", err)
+	}
+
+	if format == nil {
+		return nil, errDoesNotProvide
+	}
+
+	return s, nil
+
+	/*
+		readFile, err := os.Open(strings.TrimPrefix(userInput, "sbom:"))
+
+		if err != nil {
+			fmt.Printf("error opening file: %v\n", err)
+			os.Exit(1)
+		}*/
+
+	/*
+		rd := bufio.NewReader(readFile)
+		for {
+			sbomInput, err := rd.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+
+				fmt.Printf("read file line error: %v", err)
+				break
+			}
+			fmt.Println(">>>>>", len(sbomInput), "<<<<")
+		}*/
+
+	/*
+		r := bufio.NewReader(readFile)
+
+		sbomInput, e := Readln(r)
+		for e == nil {
+			fmt.Println(">>>", len(sbomInput), "<<<")
+
+			s, format, err := syft.Decode(strings.NewReader(sbomInput))
+
+			if err != nil {
+				return nil, fmt.Errorf("unable to decode sbom: %w", err)
+			}
+
+			if format == nil {
+				return s, errDoesNotProvide
+			}
+			return s, nil
+			sbomInput, e = Readln(r)
+		}*/
+
+	return nil, nil
+
+	/*
+		//fileScanner.Split(bufio.ScanLines)
+		//fmt.Println(fileScanner.Scan())
+		for fileScanner.Scan() {
+
+			sbomInput := fileScanner.Text()
+			fmt.Println(">>>>>", len(sbomInput), "<<<<")
+			fmt.Println("AAAa")
+		}*/
+
+	// strings.NewReader(s)
+
+}
+
 func getSBOM(userInput string, config ProviderConfig) (*sbom.SBOM, error) {
+
 	reader, err := getSBOMReader(userInput, config)
 	if err != nil {
 		return nil, err
 	}
 
 	s, format, err := syft.Decode(reader)
+
 	if err != nil {
 		return nil, fmt.Errorf("unable to decode sbom: %w", err)
 	}

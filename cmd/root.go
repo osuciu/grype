@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -10,12 +12,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"github.com/wagoodman/go-partybus"
 
 	"github.com/anchore/grype/grype"
 	"github.com/anchore/grype/grype/db"
 	grypeDb "github.com/anchore/grype/grype/db/v4"
-	"github.com/anchore/grype/grype/event"
 	"github.com/anchore/grype/grype/grypeerr"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/matcher"
@@ -30,13 +30,9 @@ import (
 	"github.com/anchore/grype/grype/store"
 	"github.com/anchore/grype/grype/vulnerability"
 	"github.com/anchore/grype/internal"
-	"github.com/anchore/grype/internal/bus"
 	"github.com/anchore/grype/internal/config"
 	"github.com/anchore/grype/internal/format"
 	"github.com/anchore/grype/internal/log"
-	"github.com/anchore/grype/internal/ui"
-	"github.com/anchore/grype/internal/version"
-	"github.com/anchore/stereoscope"
 	"github.com/anchore/syft/syft/linux"
 	syftPkg "github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/source"
@@ -238,6 +234,19 @@ func bindRootConfigOptions(flags *pflag.FlagSet) error {
 	return nil
 }
 
+func Readln(r *bufio.Reader) (string, error) {
+	var (
+		isPrefix bool  = true
+		err      error = nil
+		line, ln []byte
+	)
+	for isPrefix && err == nil {
+		line, isPrefix, err = r.ReadLine()
+		ln = append(ln, line...)
+	}
+	return string(ln), err
+}
+
 func rootExec(_ *cobra.Command, args []string) error {
 	// we may not be provided an image if the user is piping in SBOM input
 	var userInput string
@@ -245,24 +254,56 @@ func rootExec(_ *cobra.Command, args []string) error {
 		userInput = args[0]
 	}
 
-	reporter, closer, err := reportWriter()
-	defer func() {
-		if err := closer(); err != nil {
-			log.Warnf("unable to write to report destination: %+v", err)
-		}
-	}()
+	//fmt.Println(appConfig)
+
+	readFile, err := os.Open(strings.TrimPrefix(userInput, "sbom:"))
+
+	if err != nil {
+		fmt.Printf("error opening file: %v\n", err)
+		os.Exit(1)
+	}
+
+	reporter, _, err := reportWriter()
 
 	if err != nil {
 		return err
 	}
 
-	return eventLoop(
-		startWorker(userInput, appConfig.FailOnSeverity),
-		setupSignals(),
-		eventSubscription,
-		stereoscope.Cleanup,
-		ui.Select(isVerbose(), appConfig.Quiet, reporter)...,
-	)
+	r := bufio.NewReader(readFile)
+
+	sbomInput, e := Readln(r)
+	for e == nil {
+		log.Debugf(">>>", len(sbomInput), "<<<")
+
+		/*
+			defer func() {
+				if err := closer(); err != nil {
+					log.Warnf("unable to write to report destination: %+v", err)
+				}
+			}()
+		*/
+		/*
+			eventLoop(
+				startWorker(sbomInput, appConfig.FailOnSeverity),
+				setupSignals(),
+				eventSubscription,
+				stereoscope.Cleanup,
+				ui.Select(isVerbose(), appConfig.Quiet, reporter)...,
+			)*/
+		startWorker(sbomInput, appConfig.FailOnSeverity, reporter)
+
+		sbomInput, e = Readln(r)
+	}
+
+	return nil
+	/*
+		return eventLoop(
+			startWorker(userInput, appConfig.FailOnSeverity),
+			setupSignals(),
+			eventSubscription,
+			stereoscope.Cleanup,
+			ui.Select(isVerbose(), appConfig.Quiet, reporter)...,
+		)*/
 }
 
 func isVerbose() (result bool) {
@@ -277,17 +318,18 @@ func isVerbose() (result bool) {
 }
 
 //nolint:funlen
-func startWorker(userInput string, failOnSeverity *vulnerability.Severity) <-chan error {
+func startWorker(userInput string, failOnSeverity *vulnerability.Severity, reporter io.Writer) <-chan error {
+	log.Debugf(">>>2", len(userInput), "<<<")
 	errs := make(chan error)
-	go func() {
-		defer close(errs)
 
-		presenterConfig, err := presenter.ValidatedConfig(appConfig.Output, appConfig.OutputTemplateFile)
-		if err != nil {
-			errs <- err
-			return
-		}
+	defer close(errs)
 
+	presenterConfig, err := presenter.ValidatedConfig(appConfig.Output, appConfig.OutputTemplateFile)
+	if err != nil {
+		errs <- err
+		return nil
+	}
+	/*
 		if appConfig.CheckForAppUpdate {
 			isAvailable, newVersion, err := version.IsUpdateAvailable()
 			if err != nil {
@@ -303,88 +345,92 @@ func startWorker(userInput string, failOnSeverity *vulnerability.Severity) <-cha
 			} else {
 				log.Debugf("No new %s update available", internal.ApplicationName)
 			}
-		}
+		}*/
 
-		var store *store.Store
-		var status *db.Status
-		var dbCloser *db.Closer
-		var packages []pkg.Package
-		var context pkg.Context
-		var wg = &sync.WaitGroup{}
-		var loadedDB, gatheredPackages bool
+	var store *store.Store
+	var status *db.Status
+	var dbCloser *db.Closer
+	var packages []pkg.Package
+	var context pkg.Context
+	var wg = &sync.WaitGroup{}
+	var loadedDB, gatheredPackages bool
 
-		wg.Add(2)
+	wg.Add(2)
 
-		go func() {
-			defer wg.Done()
-			log.Debug("loading DB")
-			store, status, dbCloser, err = grype.LoadVulnerabilityDB(appConfig.DB.ToCuratorConfig(), appConfig.DB.AutoUpdate)
-			if err = validateDBLoad(err, status); err != nil {
-				errs <- err
-				return
-			}
-			loadedDB = true
-		}()
-
-		go func() {
-			defer wg.Done()
-			log.Debugf("gathering packages")
-			packages, context, err = pkg.Provide(userInput, getProviderConfig())
-			if err != nil {
-				errs <- fmt.Errorf("failed to catalog: %w", err)
-				return
-			}
-			gatheredPackages = true
-		}()
-
-		wg.Wait()
-		if !loadedDB || !gatheredPackages {
+	go func() {
+		defer wg.Done()
+		log.Debug("loading DB")
+		store, status, dbCloser, err = grype.LoadVulnerabilityDB(appConfig.DB.ToCuratorConfig(), appConfig.DB.AutoUpdate)
+		if err = validateDBLoad(err, status); err != nil {
+			errs <- err
 			return
 		}
+		loadedDB = true
+	}()
 
-		if dbCloser != nil {
-			defer dbCloser.Close()
+	go func() {
+		defer wg.Done()
+		log.Debugf("gathering packages")
+		packages, context, err = pkg.Provide(userInput, getProviderConfig())
+		if err != nil {
+			errs <- fmt.Errorf("failed to catalog: %w", err)
+			return
 		}
+		gatheredPackages = true
+	}()
 
-		if appConfig.OnlyFixed {
-			appConfig.Ignore = append(appConfig.Ignore, ignoreNonFixedMatches...)
-		}
+	wg.Wait()
+	if !loadedDB || !gatheredPackages {
+		return nil
+	}
 
-		if appConfig.OnlyNotFixed {
-			appConfig.Ignore = append(appConfig.Ignore, ignoreFixedMatches...)
-		}
+	if dbCloser != nil {
+		defer dbCloser.Close()
+	}
 
-		applyDistroHint(packages, &context, appConfig)
+	if appConfig.OnlyFixed {
+		appConfig.Ignore = append(appConfig.Ignore, ignoreNonFixedMatches...)
+	}
 
-		matchers := matcher.NewDefaultMatchers(matcher.Config{
-			Java:       appConfig.ExternalSources.ToJavaMatcherConfig(appConfig.Match.Java),
-			Ruby:       ruby.MatcherConfig(appConfig.Match.Ruby),
-			Python:     python.MatcherConfig(appConfig.Match.Python),
-			Dotnet:     dotnet.MatcherConfig(appConfig.Match.Dotnet),
-			Javascript: javascript.MatcherConfig(appConfig.Match.Javascript),
-			Golang:     golang.MatcherConfig(appConfig.Match.Golang),
-			Stock:      stock.MatcherConfig(appConfig.Match.Stock),
-		})
+	if appConfig.OnlyNotFixed {
+		appConfig.Ignore = append(appConfig.Ignore, ignoreFixedMatches...)
+	}
 
-		allMatches := grype.FindVulnerabilitiesForPackage(*store, context.Distro, matchers, packages)
-		remainingMatches, ignoredMatches := match.ApplyIgnoreRules(allMatches, appConfig.Ignore)
+	applyDistroHint(packages, &context, appConfig)
 
-		if count := len(ignoredMatches); count > 0 {
-			log.Infof("ignoring %d matches due to user-provided ignore rules", count)
-		}
+	matchers := matcher.NewDefaultMatchers(matcher.Config{
+		Java:       appConfig.ExternalSources.ToJavaMatcherConfig(appConfig.Match.Java),
+		Ruby:       ruby.MatcherConfig(appConfig.Match.Ruby),
+		Python:     python.MatcherConfig(appConfig.Match.Python),
+		Dotnet:     dotnet.MatcherConfig(appConfig.Match.Dotnet),
+		Javascript: javascript.MatcherConfig(appConfig.Match.Javascript),
+		Golang:     golang.MatcherConfig(appConfig.Match.Golang),
+		Stock:      stock.MatcherConfig(appConfig.Match.Stock),
+	})
 
-		// determine if there are any severities >= to the max allowable severity (which is optional).
-		// note: until the shared file lock in sqlittle is fixed the sqlite DB cannot be access concurrently,
-		// implying that the fail-on-severity check must be done before sending the presenter object.
-		if hitSeverityThreshold(failOnSeverity, remainingMatches, store) {
-			errs <- grypeerr.ErrAboveSeverityThreshold
-		}
+	allMatches := grype.FindVulnerabilitiesForPackage(*store, context.Distro, matchers, packages)
+	remainingMatches, ignoredMatches := match.ApplyIgnoreRules(allMatches, appConfig.Ignore)
 
+	if count := len(ignoredMatches); count > 0 {
+		log.Infof("ignoring %d matches due to user-provided ignore rules", count)
+	}
+
+	// determine if there are any severities >= to the max allowable severity (which is optional).
+	// note: until the shared file lock in sqlittle is fixed the sqlite DB cannot be access concurrently,
+	// implying that the fail-on-severity check must be done before sending the presenter object.
+	if hitSeverityThreshold(failOnSeverity, remainingMatches, store) {
+		errs <- grypeerr.ErrAboveSeverityThreshold
+	}
+	/*
 		bus.Publish(partybus.Event{
 			Type:  event.VulnerabilityScanningFinished,
 			Value: presenter.GetPresenter(presenterConfig, remainingMatches, ignoredMatches, packages, context, store, appConfig, status),
-		})
-	}()
+		})*/
+	p := presenter.GetPresenter(presenterConfig, remainingMatches, ignoredMatches, packages, context, store, appConfig, status)
+	p.Present(reporter)
+	//fmt.Println("HERE")
+	//fmt.Println(fmt.Println(reflect.TypeOf(presenter.GetPresenter(presenterConfig, remainingMatches, ignoredMatches, packages, context, store, appConfig, status))))
+
 	return errs
 }
 

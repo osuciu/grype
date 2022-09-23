@@ -17,6 +17,7 @@ func reportWriter() (io.Writer, func() error, error) {
 
 	default:
 		reportFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+		//reportFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 
 		if err != nil {
 			return nil, nop, fmt.Errorf("unable to create report file: %w", err)
